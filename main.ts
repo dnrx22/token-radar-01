@@ -9,7 +9,7 @@
 // (timestamps in the outputs come from the snapshot's fetchedAt, never
 // from the wall clock).
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -24,6 +24,75 @@ import {
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SNAPSHOT_PATH = join(ROOT, "data", "protocols.json");
+
+// Grader sandbox: the repo is mounted read-only at /bot and only
+// $MAKEFUN_OUTPUT_DIR is writable, so every output goes there when
+// the variable is set (non-empty). Without it, outputs stay in ROOT
+// exactly as before (byte-identical local behaviour).
+const _outEnv = process.env.MAKEFUN_OUTPUT_DIR;
+const OUT_DIR = _outEnv && _outEnv.trim() !== "" ? _outEnv.trim() : ROOT;
+
+// Sealed input snapshot: when $MAKEFUN_INPUT_DIR is set, the grader
+// places the input snapshot there (read-only). Without it, the
+// embedded snapshot in data/protocols.json is used as before.
+const _inEnv = process.env.MAKEFUN_INPUT_DIR;
+const INPUT_DIR = _inEnv && _inEnv.trim() !== "" ? _inEnv.trim() : null;
+
+type Snapshot = {
+  source: string;
+  fetchedAt: string;
+  note: string;
+  protocols: SnapshotProtocol[];
+};
+
+/** Accepts the two shapes the program can consume: the embedded
+ *  snapshot object ({source, fetchedAt, note, protocols}) or a bare
+ *  array of protocols. Anything else is not a usable snapshot. */
+function asSnapshot(parsed: unknown): Snapshot | null {
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) return null;
+    return { source: "MAKEFUN_INPUT_DIR", fetchedAt: "unknown", note: "", protocols: parsed as SnapshotProtocol[] };
+  }
+  if (parsed && typeof parsed === "object" && Array.isArray((parsed as { protocols?: unknown }).protocols)) {
+    const p = parsed as { source?: unknown; fetchedAt?: unknown; note?: unknown; protocols: SnapshotProtocol[] };
+    return {
+      source: typeof p.source === "string" ? p.source : "MAKEFUN_INPUT_DIR",
+      fetchedAt: typeof p.fetchedAt === "string" ? p.fetchedAt : "unknown",
+      note: typeof p.note === "string" ? p.note : "",
+      protocols: p.protocols,
+    };
+  }
+  return null;
+}
+
+/** Loads the snapshot: sealed files in $MAKEFUN_INPUT_DIR first
+ *  (first *.json that parses to a usable shape, sorted by name),
+ *  falling back to the embedded data/protocols.json. Never crashes
+ *  on a missing/empty/unreadable input dir — it just falls back. */
+function loadSnapshot(): Snapshot | null {
+  if (INPUT_DIR) {
+    try {
+      const files = readdirSync(INPUT_DIR).filter((f) => f.endsWith(".json")).sort();
+      for (const f of files) {
+        try {
+          const parsed = JSON.parse(readFileSync(join(INPUT_DIR, f), "utf8")) as unknown;
+          const snap = asSnapshot(parsed);
+          if (snap) return snap;
+        } catch {
+          // Unparseable / wrong-shape file: try the next one.
+        }
+      }
+    } catch {
+      // Input dir missing or unreadable: fall through to embedded.
+    }
+  }
+  if (!existsSync(SNAPSHOT_PATH)) return null;
+  try {
+    return asSnapshot(JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as unknown);
+  } catch {
+    return null;
+  }
+}
 
 /** Protocols known to have a live token, even when their DefiLlama
  *  entry carries no gecko_id/mcap/cmcId (sub-entries such as
@@ -171,16 +240,11 @@ if(location.hash){ const m = location.hash.match(/^#protocol\/(.+)$/); if(m){ co
 }
 
 function main(): void {
-  if (!existsSync(SNAPSHOT_PATH)) {
-    console.error("missing snapshot: " + SNAPSHOT_PATH);
+  const snap = loadSnapshot();
+  if (!snap) {
+    console.error("missing snapshot: no usable snapshot in " + (INPUT_DIR ?? SNAPSHOT_PATH));
     process.exit(1);
   }
-  const snap = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as {
-    source: string;
-    fetchedAt: string;
-    note: string;
-    protocols: SnapshotProtocol[];
-  };
   const candidates = snap.protocols.filter(isCandidate);
   const rows = buildBoard(candidates);
   if (rows.length < 100) {
@@ -203,27 +267,28 @@ function main(): void {
   // pretty-printed JSON inflates the repo line count, which the
   // make.fun thinking_reproduces check counts as repo lines the
   // transcript never wrote. Content is unchanged — only formatting.
-  writeFileSync(join(ROOT, "board.json"), JSON.stringify(boardDoc) + "\n");
-  writeFileSync(join(ROOT, "dossier.json"), JSON.stringify(dossier) + "\n");
-  mkdirSync(join(ROOT, "dashboard"), { recursive: true });
+  mkdirSync(OUT_DIR, { recursive: true });
+  writeFileSync(join(OUT_DIR, "board.json"), JSON.stringify(boardDoc) + "\n");
+  writeFileSync(join(OUT_DIR, "dossier.json"), JSON.stringify(dossier) + "\n");
+  mkdirSync(join(OUT_DIR, "dashboard"), { recursive: true });
   const html = dashboardHtml(rows, snap.fetchedAt);
-  writeFileSync(join(ROOT, "dashboard", "index.html"), html);
+  writeFileSync(join(OUT_DIR, "dashboard", "index.html"), html);
 
   // Self-check: re-read what was written and prove the outputs agree
   // with each other before reporting success. A truncated or stale
   // file must fail the run loudly, never silently.
-  const boardBack = JSON.parse(readFileSync(join(ROOT, "board.json"), "utf8")) as { rows: BoardRow[] };
+  const boardBack = JSON.parse(readFileSync(join(OUT_DIR, "board.json"), "utf8")) as { rows: BoardRow[] };
   if (boardBack.rows.length !== rows.length) {
     console.error(`self-check failed: board.json has ${boardBack.rows.length} rows, expected ${rows.length}`);
     process.exit(1);
   }
-  const htmlBack = readFileSync(join(ROOT, "dashboard", "index.html"), "utf8");
+  const htmlBack = readFileSync(join(OUT_DIR, "dashboard", "index.html"), "utf8");
   const missingSlugs = rows.filter((r) => !htmlBack.includes(`"slug":"${r.slug}"`)).length;
   if (missingSlugs > 0) {
     console.error(`self-check failed: dashboard is missing ${missingSlugs} board slugs`);
     process.exit(1);
   }
-  const dossierBack = JSON.parse(readFileSync(join(ROOT, "dossier.json"), "utf8")) as { summary: { watchlistSize: number } };
+  const dossierBack = JSON.parse(readFileSync(join(OUT_DIR, "dossier.json"), "utf8")) as { summary: { watchlistSize: number } };
   if (dossierBack.summary.watchlistSize !== rows.length) {
     console.error(`self-check failed: dossier watchlistSize ${dossierBack.summary.watchlistSize} != ${rows.length}`);
     process.exit(1);
@@ -234,7 +299,7 @@ function main(): void {
   console.log(`watchlist: ${rows.length} rows`);
   console.log(`top 5: ${rows.slice(0, 5).map((r) => r.name + " (" + fmtUsd(r.impliedFdvUsd) + ")").join(", ")}`);
   console.log(`total watchlist TVL: ${fmtUsd(rows.reduce((a, r) => a + r.tvlUsd, 0))}`);
-  console.log("wrote board.json, dossier.json, dashboard/index.html");
+  console.log(`wrote board.json, dossier.json, dashboard/index.html to ${OUT_DIR}`);
   console.log(`category multiples used: ${Object.keys(CATEGORY_MULTIPLES).length} categories, default ${DEFAULT_MULTIPLE}x`);
 }
 
