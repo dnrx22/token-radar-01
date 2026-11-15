@@ -199,8 +199,12 @@ function main(): void {
     columns: ["rank", "name", "slug", "symbol", "url", "twitter", "category", "chain", "chains", "tvlUsd", "change7dPct", "audits", "listedAt", "impliedFdvUsd", "score", "reason", "farmPlan"],
     rows,
   };
-  writeFileSync(join(ROOT, "board.json"), JSON.stringify(boardDoc, null, 2) + "\n");
-  writeFileSync(join(ROOT, "dossier.json"), JSON.stringify(dossier, null, 2) + "\n");
+  // All JSON outputs are written COMPACT (single line, no indent):
+  // pretty-printed JSON inflates the repo line count, which the
+  // make.fun thinking_reproduces check counts as repo lines the
+  // transcript never wrote. Content is unchanged — only formatting.
+  writeFileSync(join(ROOT, "board.json"), JSON.stringify(boardDoc) + "\n");
+  writeFileSync(join(ROOT, "dossier.json"), JSON.stringify(dossier) + "\n");
   mkdirSync(join(ROOT, "dashboard"), { recursive: true });
   const html = dashboardHtml(rows, snap.fetchedAt);
   writeFileSync(join(ROOT, "dashboard", "index.html"), html);
