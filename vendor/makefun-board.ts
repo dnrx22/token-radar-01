@@ -29,6 +29,14 @@ export interface SnapshotProtocol {
   listedAt: number | null;
   description: string;
   twitter: string | null;
+  // Token-presence markers from a raw DefiLlama snapshot. A protocol
+  // with any of these filled in already has a live token and is NOT
+  // tokenless. The embedded snapshot is pre-filtered, so these are
+  // absent/null there; the fields exist so a raw sealed snapshot can
+  // be filtered at run time.
+  gecko_id?: string | null;
+  mcap?: number | null;
+  cmcId?: string | null;
 }
 
 export interface BoardRow {
